@@ -13,7 +13,6 @@
 %% gen_fsm callbacks
 -export([init/1,
          state_name/2,
-%         state_name/3,
          handle_event/3,
          handle_sync_event/4,
          handle_info/3,
@@ -23,14 +22,10 @@
          empty/3,
          full/3
         ]).
-%%
+%% Client functions
 -export([release_cycle/1,
          secure_cycle/1,
          get_info/1]).
-%% State manipulator
-%-export([release_operation/1,
-%         secure_operation/1]).
-
 
 -record(state, {total, occupied}).
 
@@ -147,8 +142,6 @@ full({release, _Ref}, _From, State) ->
 full({secure, _Ref}, _From, State) ->
     Reply = {error, full},
     {reply, Reply, full, State}.
-
-%predictable consistent concise reliable debuggable
 
 %%--------------------------------------------------------------------
 %% @private
