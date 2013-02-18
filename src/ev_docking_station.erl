@@ -1,6 +1,6 @@
 %%%===================================================================
 %%% The Erlangville Cycle Hire System
-%%%
+%%% Simon Kers -- KTH 2013
 %%%===================================================================
 -module(ev_docking_station).
 -author('skers@kth.se').
@@ -8,7 +8,8 @@
 -behaviour(gen_fsm).
 
 %% API
--export([start_link/2]).
+-export([start_link/2,
+         start_link/3]).
 
 %% gen_fsm callbacks
 -export([init/1,
@@ -27,10 +28,20 @@
          secure_cycle/1,
          get_info/1]).
 
--record(state, {total, occupied}).
+%% State record
+-record(state, {ref, pid, total, occupied}).
 
--define(SECURE(S),  {state, S#state.total, S#state.occupied + 1}).
--define(RELEASE(S), {state, S#state.total, S#state.occupied - 1}).
+-define(DBNAME, ev_db).
+-define(SECURE(S),  ?DBNAME, {state,
+                              S#state.ref,
+                              S#state.pid,
+                              S#state.total,
+                              S#state.occupied + 1}).
+-define(RELEASE(S), ?DBNAME, {state,
+                              S#state.ref,
+                              S#state.pid,
+                              S#state.total,
+                              S#state.occupied - 1}).
 
 %%%===================================================================
 %%% API
@@ -47,6 +58,9 @@
 %%--------------------------------------------------------------------
 start_link(Total, Occupied) ->
     gen_fsm:start_link({local, ?MODULE}, ?MODULE, [Total, Occupied], []).
+
+start_link(StationRef, Total, Occupied) ->
+    gen_fsm:start_link(?MODULE, [StationRef, Total, Occupied], []).
 
 %%%===================================================================
 %%% gen_fsm callbacks
@@ -65,14 +79,30 @@ start_link(Total, Occupied) ->
 %%                     {stop, StopReason}
 %% @end
 %%--------------------------------------------------------------------
-init([Total, _]) when Total < 1 ->
+init([_Ref, Total, _]) when Total < 1 ->
     {error, too_few};
-init([Total, 0]) ->
+init([_Ref, Total, 0]) ->
     {ok, empty, #state{total=Total, occupied=0}};
-init([Total, Occupied]) when Total == Occupied ->
-    {ok, full,  #state{total=Total, occupied=Occupied}};
-init([Total, Occupied]) ->
-    {ok, idle,  #state{total=Total, occupied=Occupied}}.
+
+init([Ref,  Total, Occupied]) when Total == Occupied ->
+    ets:insert(?DBNAME, #state{ref      = Ref,
+                               pid      = self(),
+                               total    = Total,
+                               occupied = Occupied}),
+
+    State = #state{ref=Ref, pid=self(), total=Total, occupied=Occupied},
+    {ok, full, State};
+
+init([Ref, Total, Occupied]) ->
+    io:format("Ref: ~p~nTotal: ~p~nOccupied: ~p~n~n", [Ref, Total, Occupied]),
+
+    ets:insert(?DBNAME, #state{ref      = Ref,
+                               pid      = self(),
+                               total    = Total,
+                               occupied = Occupied}),
+
+    State = #state{ref=Ref, pid=self(), total=Total, occupied=Occupied},
+    {ok, idle, State}.
 
 %%--------------------------------------------------------------------
 %% @private
@@ -110,24 +140,35 @@ state_name(_Event, State) ->
 %%                   {stop, Reason, Reply, NewState}
 %% @end
 %%--------------------------------------------------------------------
-idle({release, _Ref}, _From, State) ->
+idle({release, #state.ref}, _From, State) ->
     case State#state.occupied of
         1 ->
             Reply = ok,
-            {reply, Reply, empty, ?RELEASE(State)};
+            NewState = ?RELEASE(State),
+            ets:insert(?DBNAME, NewState),
+            {reply, Reply, empty, NewState};
         _More -> 
             Reply = ok,
-            {reply, Reply, idle,  ?RELEASE(State)}
+            NewState = ?RELEASE(State),
+            ets:insert(?DBNAME, NewState),
+            {reply, Reply, idle, NewState}
     end;
-idle({secure, _Ref}, _From, State) ->
-    case State#state.occupied + 1 == State#state.total of
+idle({secure, Ref}, _From, State) ->
+    RefState = ets:lookup(?DBNAME, Ref),
+    io:format("RefState: ~p~n", [RefState]),
+    case RefState#state.occupied + 1 == RefState#state.total of
         true ->
             Reply = ok,
-            {reply, Reply, full, ?SECURE(State)};
+            NewState = ?SECURE(RefState),
+            ets:insert(?DBNAME, NewState),
+            {reply, Reply, full, NewState};
         _More -> 
             Reply = ok,
-            {reply, Reply, idle, ?SECURE(State)}
+            NewState = ?SECURE(RefState),
+            ets:insert(?DBNAME, NewState),
+            {reply, Reply, idle, NewState}
     end.
+
 
 empty({release, _Ref}, _From, State) ->
     Reply = {error, empty},
@@ -195,10 +236,6 @@ handle_sync_event({info, _Ref}, _From, StateName, State) ->
 %%                   {stop, Reason, NewState}
 %% @end
 %%--------------------------------------------------------------------
-%handle_info({info, _Ref}, _StateName, #state{total=Total, occupied=Occupied}) ->
-%    Free = Total - Occupied,
-%    Reply = [{total, Total}, {occupied, Occupied}, {free, Free}],
-%    {ok, Reply};
 handle_info(_Info, StateName, State) ->
     {next_state, StateName, State}.
 
