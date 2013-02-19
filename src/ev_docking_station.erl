@@ -27,22 +27,15 @@
 -export([release_cycle/1,
          secure_cycle/1,
          get_info/1,
-         stop/1]).
+         update_db/2]).
+%%Internal functions
+-export([secure/1,
+         release/1]).
 
 %% State record
 -record(state, {ref, pid, total, occupied}).
 
--define(DBNAME, ev_db).
--define(SECURE(S),  {state,
-                     S#state.ref,
-                     S#state.pid,
-                     S#state.total,
-                     S#state.occupied + 1}).
--define(RELEASE(S), {state,
-                     S#state.ref,
-                     S#state.pid,
-                     S#state.total,
-                     S#state.occupied - 1}).
+-define(DB, ev_db).
 
 %%%===================================================================
 %%% API
@@ -64,21 +57,16 @@ start_link(StationRef, Total, Occupied) ->
     gen_fsm:start_link(?MODULE, [StationRef, Total, Occupied], []).
 
 release_cycle(Ref) ->
-    [#state{ref=_, pid=Pid, total=_, occupied=_}] = ets:lookup(?DBNAME, Ref),
+    [[Pid]] = ets:match(?DB, #state{ref=Ref,pid='$1',total='_',occupied='_'}),
     gen_fsm:sync_send_event(Pid, {release, Ref}).
 
 secure_cycle(Ref) ->
-    [#state{ref=_,pid=Pid,total=_,occupied=_}] = ets:lookup(?DBNAME, Ref),
+    [[Pid]] = ets:match(?DB, #state{ref=Ref,pid='$1',total='_',occupied='_'}),
     gen_fsm:sync_send_event(Pid, {secure, Ref}).
 
 get_info(Ref) ->
-    [#state{ref=_,pid=Pid,total=_,occupied=_}] = ets:lookup(?DBNAME, Ref),
+    [[Pid]] = ets:match(?DB, #state{ref=Ref,pid='$1',total='_',occupied='_'}),
     gen_fsm:sync_send_all_state_event(Pid, {info, Ref}).
-
-stop(Ref) ->
-    [#state{ref=_,pid=Pid,total=_,occupied=_}] = ets:lookup(?DBNAME, Ref),
-    Pid.
-    %exit(erlang:pid(Pid, kill)).
 
 %%%===================================================================
 %%% gen_fsm callbacks
@@ -99,34 +87,17 @@ stop(Ref) ->
 %%--------------------------------------------------------------------
 init([_Ref, Total, _]) when Total < 1 ->
     {error, too_few};
-init([Ref, Total, 0]) ->
-    process_flag(trap_exit, true),
-    ets:insert(?DBNAME, #state{ref      = Ref,
-                               pid      = self(),
-                               total    = Total,
-                               occupied = 0}),
-    State = #state{ref=Ref, pid=self(), total=Total, occupied=0},
-    {ok, empty, State};
+init([Ref, _, _] = Args) ->
+    update_db(?DB, Args),
+    [State] = ets:lookup(?DB, Ref),
+    Total = State#state.total,
+    Occupied = State#state.occupied,
 
-init([Ref,  Total, Occupied]) when Total == Occupied ->
-    process_flag(trap_exit, true),
-    ets:insert(?DBNAME, #state{ref      = Ref,
-                               pid      = self(),
-                               total    = Total,
-                               occupied = Occupied}),
-
-    State = #state{ref=Ref, pid=self(), total=Total, occupied=Occupied},
-    {ok, full, State};
-
-init([Ref, Total, Occupied]) ->
-    process_flag(trap_exit, true),
-    ets:insert(?DBNAME, #state{ref      = Ref,
-                               pid      = self(),
-                               total    = Total,
-                               occupied = Occupied}),
-
-    State = #state{ref=Ref, pid=self(), total=Total, occupied=Occupied},
-    {ok, idle, State}.
+    case Total - Occupied of
+        0     -> {ok, full, State};
+        Total -> {ok, empty, State};
+        _     -> {ok, idle, State}
+    end.
 
 %%--------------------------------------------------------------------
 %% @private
@@ -165,48 +136,35 @@ state_name(_Event, State) ->
 %% @end
 %%--------------------------------------------------------------------
 idle({release, _Ref}, _From, State) ->
+    NewState = release(State),
+    ets:insert(?DB, NewState),
+
     case State#state.occupied of
-        1 ->
-            Reply = ok,
-            NewState = ?RELEASE(State),
-            ets:insert(?DBNAME, NewState),
-            {reply, Reply, empty, NewState};
-        _More -> 
-            Reply = ok,
-            NewState = {state,
-                        State#state.ref,
-                        State#state.pid,
-                        State#state.total,
-                        State#state.occupied - 1},
-            ets:insert(?DBNAME, NewState),
-            {reply, Reply, idle, NewState}
+        1 -> {reply, ok, empty, NewState};
+        _ -> {reply, ok, idle, NewState}
     end;
 
 idle({secure, _Ref}, _From, State) ->
-    case State#state.occupied + 1 == State#state.total of
-        true ->
-            Reply = ok,
-            NewState = ?SECURE(State),
-            ets:insert(?DBNAME, NewState),
-            {reply, Reply, full, NewState};
-        _More -> 
-            Reply = ok,
-            NewState = ?SECURE(State),
-            ets:insert(?DBNAME, NewState),
-            {reply, Reply, idle, NewState}
-    end.
+    NewState = secure(State),
+    ets:insert(?DB, NewState),
 
+    case State#state.occupied == State#state.total of
+        true  -> {reply, ok, full, NewState};
+        false -> {reply, ok, idle, NewState}
+    end.
 
 empty({release, _Ref}, _From, State) ->
     Reply = {error, empty},
     {reply, Reply, empty, State};
+
 empty({secure, _Ref}, _From, State) ->
     Reply = ok,
-    {reply, Reply, idle, ?SECURE(State)}.
+    {reply, Reply, idle, secure(State)}.
 
 full({release, _Ref}, _From, State) ->
     Reply = ok,
-    {reply, Reply, idle, ?RELEASE(State)};
+    {reply, Reply, idle, release(State)};
+
 full({secure, _Ref}, _From, State) ->
     Reply = {error, full},
     {reply, Reply, full, State}.
@@ -263,9 +221,8 @@ handle_sync_event({info, _Ref}, _From, StateName, State) ->
 %%                   {stop, Reason, NewState}
 %% @end
 %%--------------------------------------------------------------------
-handle_info({'EXIT', Pid, Reason}, StateName, StateData) ->
-    %..code to handle exits here..
-    {next_state, StateName1, StateData1}.
+handle_info(_Info, StateName, State) ->
+    {next_state, StateName, State}.
 
 %%--------------------------------------------------------------------
 %% @private
@@ -296,4 +253,38 @@ code_change(_OldVsn, StateName, State, _Extra) ->
 %%%===================================================================
 %%% Internal functions
 %%%===================================================================
+
+update_db(Db, [Ref, Total, Occupied]) ->
+    Check = ets:match(ev_db, #state{ref=Ref,
+                                    pid='_',
+                                    total='$1',
+                                    occupied='$2'}),
+    io:format("~p~n", [Check]),
+    case Check of
+        [] -> % not in db
+            ets:insert(Db, #state{ref = Ref,
+                                  pid = self(),
+                                  total = Total,
+                                  occupied = Occupied});
+        _InDb  ->
+            [[OldTotal, OldOccupied]] = Check,
+            ets:insert(Db, #state{ref = Ref,
+                                  pid = self(),
+                                  total = OldTotal,
+                                  occupied = OldOccupied})
+    end.
+
+secure(State) ->
+    {state,
+     State#state.ref,
+     State#state.pid,
+     State#state.total,
+     State#state.occupied + 1}.
+
+release(State) ->
+    {state,
+     State#state.ref,
+     State#state.pid,
+     State#state.total,
+     State#state.occupied - 1}.
 

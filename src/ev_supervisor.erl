@@ -16,10 +16,6 @@
 
 -record(state, {ref, pid, total, occupied}).
 
--define(DBNAME, ev_db).
--define(CHILD(Id, Mod, Type, Args), {Id, {Mod, start_link, Args},
-                                     permanent, 5000, Type, [Mod]}).
-
 %%%===================================================================
 %%% API functions
 %%%===================================================================
@@ -33,16 +29,13 @@
 %%--------------------------------------------------------------------
 start_link() ->
     {ok, Pid} = supervisor:start_link({local, ?MODULE}, ?MODULE, []),
-    erlang:unlink(Pid),
     {ok, Pid}.
 
 start_child(Total, Occupied) ->
     %% create a unique reference for the station
     StationRef = make_ref(),
-
     Args = [StationRef, Total, Occupied],
     {ok, _Pid} = supervisor:start_child(?MODULE, Args),
-    %register(StationRef, Pid),
     {ok, StationRef}.
 
 %%%===================================================================
@@ -63,16 +56,11 @@ start_child(Total, Occupied) ->
 %% @end
 %%--------------------------------------------------------------------
 init(Args) ->
-    %% Create global ets, where every docking station records its state
     ets:new(ev_db, [set, public, named_table, {keypos, #state.ref}]),
-
-    Restart = {simple_one_for_one, 5, 10},
+    Restart = {simple_one_for_one, 5, 60},
     ChildSpec = {station,
                  {ev_docking_station, start_link, Args},
                  permanent, 5000, worker,
                  [ev_docking_station]},
     {ok, {Restart, [ChildSpec]}}.
 
-%%%===================================================================
-%%% Internal functions
-%%%===================================================================
