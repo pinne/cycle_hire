@@ -39,8 +39,10 @@ start_link() ->
 start_child(Total, Occupied) ->
     %% create a unique reference for the station
     StationRef = make_ref(),
+
     Args = [StationRef, Total, Occupied],
     {ok, _Pid} = supervisor:start_child(?MODULE, Args),
+    %register(StationRef, Pid),
     {ok, StationRef}.
 
 %%%===================================================================

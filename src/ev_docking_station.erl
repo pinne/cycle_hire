@@ -26,22 +26,23 @@
 %% Client functions
 -export([release_cycle/1,
          secure_cycle/1,
-         get_info/1]).
+         get_info/1,
+         stop/1]).
 
 %% State record
 -record(state, {ref, pid, total, occupied}).
 
 -define(DBNAME, ev_db).
--define(SECURE(S),  ?DBNAME, {state,
-                              S#state.ref,
-                              S#state.pid,
-                              S#state.total,
-                              S#state.occupied + 1}).
--define(RELEASE(S), ?DBNAME, {state,
-                              S#state.ref,
-                              S#state.pid,
-                              S#state.total,
-                              S#state.occupied - 1}).
+-define(SECURE(S),  {state,
+                     S#state.ref,
+                     S#state.pid,
+                     S#state.total,
+                     S#state.occupied + 1}).
+-define(RELEASE(S), {state,
+                     S#state.ref,
+                     S#state.pid,
+                     S#state.total,
+                     S#state.occupied - 1}).
 
 %%%===================================================================
 %%% API
@@ -57,10 +58,27 @@
 %% @end
 %%--------------------------------------------------------------------
 start_link(Total, Occupied) ->
-    gen_fsm:start_link({local, ?MODULE}, ?MODULE, [Total, Occupied], []).
+    gen_fsm:start_link({global, ?MODULE}, ?MODULE, [Total, Occupied], []).
 
 start_link(StationRef, Total, Occupied) ->
     gen_fsm:start_link(?MODULE, [StationRef, Total, Occupied], []).
+
+release_cycle(Ref) ->
+    [#state{ref=_, pid=Pid, total=_, occupied=_}] = ets:lookup(?DBNAME, Ref),
+    gen_fsm:sync_send_event(Pid, {release, Ref}).
+
+secure_cycle(Ref) ->
+    [#state{ref=_,pid=Pid,total=_,occupied=_}] = ets:lookup(?DBNAME, Ref),
+    gen_fsm:sync_send_event(Pid, {secure, Ref}).
+
+get_info(Ref) ->
+    [#state{ref=_,pid=Pid,total=_,occupied=_}] = ets:lookup(?DBNAME, Ref),
+    gen_fsm:sync_send_all_state_event(Pid, {info, Ref}).
+
+stop(Ref) ->
+    [#state{ref=_,pid=Pid,total=_,occupied=_}] = ets:lookup(?DBNAME, Ref),
+    Pid.
+    %exit(erlang:pid(Pid, kill)).
 
 %%%===================================================================
 %%% gen_fsm callbacks
@@ -81,10 +99,17 @@ start_link(StationRef, Total, Occupied) ->
 %%--------------------------------------------------------------------
 init([_Ref, Total, _]) when Total < 1 ->
     {error, too_few};
-init([_Ref, Total, 0]) ->
-    {ok, empty, #state{total=Total, occupied=0}};
+init([Ref, Total, 0]) ->
+    process_flag(trap_exit, true),
+    ets:insert(?DBNAME, #state{ref      = Ref,
+                               pid      = self(),
+                               total    = Total,
+                               occupied = 0}),
+    State = #state{ref=Ref, pid=self(), total=Total, occupied=0},
+    {ok, empty, State};
 
 init([Ref,  Total, Occupied]) when Total == Occupied ->
+    process_flag(trap_exit, true),
     ets:insert(?DBNAME, #state{ref      = Ref,
                                pid      = self(),
                                total    = Total,
@@ -94,8 +119,7 @@ init([Ref,  Total, Occupied]) when Total == Occupied ->
     {ok, full, State};
 
 init([Ref, Total, Occupied]) ->
-    io:format("Ref: ~p~nTotal: ~p~nOccupied: ~p~n~n", [Ref, Total, Occupied]),
-
+    process_flag(trap_exit, true),
     ets:insert(?DBNAME, #state{ref      = Ref,
                                pid      = self(),
                                total    = Total,
@@ -140,7 +164,7 @@ state_name(_Event, State) ->
 %%                   {stop, Reason, Reply, NewState}
 %% @end
 %%--------------------------------------------------------------------
-idle({release, #state.ref}, _From, State) ->
+idle({release, _Ref}, _From, State) ->
     case State#state.occupied of
         1 ->
             Reply = ok,
@@ -149,22 +173,25 @@ idle({release, #state.ref}, _From, State) ->
             {reply, Reply, empty, NewState};
         _More -> 
             Reply = ok,
-            NewState = ?RELEASE(State),
+            NewState = {state,
+                        State#state.ref,
+                        State#state.pid,
+                        State#state.total,
+                        State#state.occupied - 1},
             ets:insert(?DBNAME, NewState),
             {reply, Reply, idle, NewState}
     end;
-idle({secure, Ref}, _From, State) ->
-    RefState = ets:lookup(?DBNAME, Ref),
-    io:format("RefState: ~p~n", [RefState]),
-    case RefState#state.occupied + 1 == RefState#state.total of
+
+idle({secure, _Ref}, _From, State) ->
+    case State#state.occupied + 1 == State#state.total of
         true ->
             Reply = ok,
-            NewState = ?SECURE(RefState),
+            NewState = ?SECURE(State),
             ets:insert(?DBNAME, NewState),
             {reply, Reply, full, NewState};
         _More -> 
             Reply = ok,
-            NewState = ?SECURE(RefState),
+            NewState = ?SECURE(State),
             ets:insert(?DBNAME, NewState),
             {reply, Reply, idle, NewState}
     end.
@@ -236,8 +263,9 @@ handle_sync_event({info, _Ref}, _From, StateName, State) ->
 %%                   {stop, Reason, NewState}
 %% @end
 %%--------------------------------------------------------------------
-handle_info(_Info, StateName, State) ->
-    {next_state, StateName, State}.
+handle_info({'EXIT', Pid, Reason}, StateName, StateData) ->
+    %..code to handle exits here..
+    {next_state, StateName1, StateData1}.
 
 %%--------------------------------------------------------------------
 %% @private
@@ -268,12 +296,4 @@ code_change(_OldVsn, StateName, State, _Extra) ->
 %%%===================================================================
 %%% Internal functions
 %%%===================================================================
-release_cycle(Ref) ->
-    gen_fsm:sync_send_event(?MODULE, {release, Ref}).
-
-secure_cycle(Ref) ->
-    gen_fsm:sync_send_event(?MODULE, {secure, Ref}).
-
-get_info(Ref) ->
-    gen_fsm:sync_send_all_state_event(?MODULE, {info, Ref}).
 
