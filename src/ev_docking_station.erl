@@ -141,7 +141,7 @@ idle({release, _Ref}, _From, State) ->
 
     case State#state.occupied of
         1 -> {reply, ok, empty, NewState};
-        _ -> {reply, ok, idle, NewState}
+        _ -> {reply, ok, idle,  NewState}
     end;
 
 idle({secure, _Ref}, _From, State) ->
@@ -255,36 +255,30 @@ code_change(_OldVsn, StateName, State, _Extra) ->
 %%%===================================================================
 
 update_db(Db, [Ref, Total, Occupied]) ->
-    Check = ets:match(ev_db, #state{ref=Ref,
-                                    pid='_',
-                                    total='$1',
-                                    occupied='$2'}),
+    Check = ets:match(ev_db, #state{ref      = Ref,
+                                    pid      = '_',
+                                    total    = '$1',
+                                    occupied = '$2'}),
     io:format("~p~n", [Check]),
     case Check of
         [] -> % not in db
-            ets:insert(Db, #state{ref = Ref,
-                                  pid = self(),
-                                  total = Total,
+            ets:insert(Db, #state{ref      = Ref,
+                                  pid      = self(),
+                                  total    = Total,
                                   occupied = Occupied});
-        _InDb  ->
+        _AlreadyInDb  ->
             [[OldTotal, OldOccupied]] = Check,
-            ets:insert(Db, #state{ref = Ref,
-                                  pid = self(),
-                                  total = OldTotal,
+            ets:insert(Db, #state{ref      = Ref,
+                                  pid      = self(),
+                                  total    = OldTotal,
                                   occupied = OldOccupied})
     end.
 
 secure(State) ->
-    {state,
-     State#state.ref,
-     State#state.pid,
-     State#state.total,
-     State#state.occupied + 1}.
+    Occupied = State#state.occupied,
+    State#state{occupied = Occupied + 1}.
 
 release(State) ->
-    {state,
-     State#state.ref,
-     State#state.pid,
-     State#state.total,
-     State#state.occupied - 1}.
+    Occupied = State#state.occupied,
+    State#state{occupied = Occupied - 1}.
 
